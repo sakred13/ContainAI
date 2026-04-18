@@ -56,15 +56,19 @@ def chat():
 
     system_prompt = (
         f"You are a helpful AI assistant powered by {MODEL_NAME}. "
-        "IMPORTANT RULES ABOUT TOOL USAGE:\n"
+        "\n\nCRITICAL RULE: DO NOT USE TOOLS FOR GREETINGS OR CASUAL CONVERSATION. "
+        "If a user says 'Hi', 'Hello', or 'How are you?', you MUST respond with text ONLY. "
+        "\n\nDETAILED TOOL RULES:\n"
         "- ONLY use tools when the user's request GENUINELY requires external information you do not already know.\n"
-        "- For greetings, casual conversation, opinions, creative writing, general knowledge, coding questions, or math — just respond directly. DO NOT call any tools.\n"
-        "- Use 'robust_internet_search' ONLY when the user asks about current events, live data, or real-time information.\n"
-        "- Use 'fetch_website_content' ONLY when the user provides a specific URL to read.\n"
-        "- Use 'wikipedia_search' ONLY when the user asks about a topic that requires encyclopedia-level detail.\n"
-        "- Use 'execute_python_code' ONLY when the user explicitly asks you to run or test code.\n"
-        "- Use 'get_current_time' ONLY when the user asks what time or date it is.\n"
-        "- When in doubt, respond directly WITHOUT using tools."
+        "- For greetings, opinions, creative writing, general knowledge, coding questions, or math — respond directly. DO NOT call any tools.\n"
+        "- Use 'robust_internet_search' ONLY for live data or current news.\n"
+        "- Use 'fetch_website_content' ONLY for specific URLs provided by the user.\n"
+        "- Use 'wikipedia_search' ONLY for factual encyclopedia lookups.\n"
+        "- Use 'execute_python_code' ONLY when explicitly asked to run or test code.\n"
+        "- Use 'get_current_time' ONLY when the user explicitly asks for the current time or date.\n"
+        "\nEXAMPLE OF WRONG BEHAVIOR:\n"
+        "User: 'Hi'\n"
+        "Assistant: [Calling get_current_time] <--- WRONG! Respond with 'Hello! How can I help you?' instead."
     )
 
     lc_messages = [SystemMessage(content=system_prompt)]
@@ -227,7 +231,19 @@ def orchestrate():
             return
         
         agent_names = [a["name"] for a in agents]
+        is_interactive = any(word in scenario.lower() for word in ["ask", "question", "input", "interact", "opinion", "debate"])
+        
+        # Boost rounds for interactive sessions if not explicitly low
+        if is_interactive and rounds < 3:
+            rounds = 10
+            
         yield json.dumps({"type": "status", "content": f"🎭 Setting up **{len(agents)} agents**: {', '.join(agent_names)} for up to **{rounds} rounds**\n\n**Scenario:** {scenario}"}) + "\n"
+        
+        # If interactive, wait for the user to provide the first question/topic
+        if is_interactive:
+            yield json.dumps({"type": "status", "content": "👋 **Interaction required!** Please provide your first question or topic using the interject box."}) + "\n"
+            while not sim_interjections[convo_id]:
+                time.sleep(0.5)
         
         # Step 2: Detect agent roles for tool-aware prompting
         TOOL_ROLES = {"REVIEWER", "TESTER", "QA", "VERIFIER", "VALIDATOR"}
@@ -259,8 +275,8 @@ def orchestrate():
                     f"You are in a scenario: {scenario}. "
                     f"You are interacting with: {', '.join(other_agents)}. "
                     f"This is round {round_num} of {rounds}. "
-                    f"Stay in character. Keep your response concise. "
-                    f"Respond ONLY as {agent_name} — do not narrate or break character."
+                    f"Respond ONLY as {agent_name} in the FIRST PERSON. Do NOT describe your actions or narrate. "
+                    f"Speak directly to others. Stay in character even if you disagree with them."
                 )
                 
                 if is_tool_agent:
@@ -342,13 +358,39 @@ def orchestrate():
                 # Check for approval
                 if "APPROVED" in reply.upper():
                     approved = True
+                    break
+
+                # --- HITL Check: Should we wait for the user? ---
+                waiting_for_user = "@USER" in reply.upper() or "WAITING" in reply.upper()
+                
+                if waiting_for_user:
+                    yield json.dumps({"type": "status", "content": f"⏸️ **{agent_name}** is waiting for your input. Use the interject box above to reply!"}) + "\n"
+                
+                # Intelligent Pacing & Wait Logic
+                # Loop for a while to allow user to read, but BLOCK if we are waiting_for_user
+                pacing_steps = 0
+                max_pacing = 25 # 2.5 seconds default pacing
+                
+                while True:
+                    # If user interjects with "PAUSE", we enter a wait loop
+                    has_pause = any("PAUSE" in str(x).upper() for x in sim_interjections[convo_id])
                     
-                # Intelligent Pacing: Wait ~2.5 seconds between turns to let user read
-                # but break the wait instantly if the user submits an interjection!
-                for _ in range(25):
-                    time.sleep(0.1)
-                    if sim_interjections[convo_id]:
-                        break
+                    if waiting_for_user or has_pause:
+                        # Hard Block: Wait for ANY new input
+                        time.sleep(0.5)
+                        if sim_interjections[convo_id]:
+                             # New input received! Break the block.
+                             waiting_for_user = False
+                             # Clear 'PAUSE' if it was there
+                             sim_interjections[convo_id] = [x for x in sim_interjections[convo_id] if "PAUSE" not in str(x).upper()]
+                             break
+                        continue
+                    else:
+                        # Standard Pacing: Wait ~2.5s then continue
+                        time.sleep(0.1)
+                        pacing_steps += 1
+                        if pacing_steps >= max_pacing or sim_interjections[convo_id]:
+                            break
         
         if approved:
             yield json.dumps({"type": "status", "content": f"\n\n✅ **{agent_names[-1]} APPROVED the result!** Simulation ended after {round_num} rounds."}) + "\n"

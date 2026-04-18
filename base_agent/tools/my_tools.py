@@ -90,8 +90,8 @@ def robust_internet_search(query: str) -> str:
         return f"Internet Search Error: {str(e)}"
 
 @tool
-def get_current_time(query: str) -> str:
-    """Useful to get the current date and time. Input can be anything (ignored)."""
+def get_current_time(query: str = "") -> str:
+    """Returns the current date and time. ONLY use this when the user explicitly asks for the time or date. NEVER use this for greetings or casual conversation."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 @tool

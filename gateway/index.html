@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ContainAI — Model Selector</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #e0e0e0;
+            padding: 2rem;
+        }
+
+        .hero {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .hero h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #f7971e, #ffd200);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .hero p {
+            font-size: 1.1rem;
+            color: #a0a0c0;
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            max-width: 960px;
+            width: 100%;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 2rem;
+            transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+            cursor: pointer;
+            text-decoration: none;
+            color: inherit;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            border-color: rgba(255, 215, 0, 0.4);
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            border-radius: 16px 16px 0 0;
+        }
+
+        .card:nth-child(1)::before {
+            background: linear-gradient(90deg, #f7971e, #ffd200);
+        }
+
+        .card:nth-child(2)::before {
+            background: linear-gradient(90deg, #11998e, #38ef7d);
+        }
+
+        .card:nth-child(3)::before {
+            background: linear-gradient(90deg, #667eea, #764ba2);
+        }
+
+        .card .icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .card h2 {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+
+        .card .model-tag {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            padding: 0.25rem 0.6rem;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #ccc;
+            margin-bottom: 0.75rem;
+            font-family: monospace;
+        }
+
+        .card p {
+            font-size: 0.9rem;
+            color: #a0a0c0;
+            line-height: 1.6;
+            flex-grow: 1;
+        }
+
+        .card .port {
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #666;
+        }
+
+        .footer {
+            margin-top: 3rem;
+            text-align: center;
+            font-size: 0.8rem;
+            color: #555;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="hero">
+        <h1>🐋 ContainAI</h1>
+        <p>Choose an AI model below. Each agent runs in its own isolated Docker container, powered by Ollama &
+            LangChain.</p>
+    </div>
+
+    <div class="grid">
+        <a class="card" href="http://localhost:7861" target="_blank">
+            <span class="icon">🦙</span>
+            <h2>Llama Agent</h2>
+            <span class="model-tag">llama3.2</span>
+            <p>Meta's powerhouse. Great all-rounder for reasoning, coding, and general conversation. 3B parameters, fast
+                inference.</p>
+            <span class="port">Port 7861</span>
+        </a>
+
+        <a class="card" href="http://localhost:7862" target="_blank">
+            <span class="icon">💎</span>
+            <h2>Mistral Agent</h2>
+            <span class="model-tag">mistral</span>
+            <p>Mistral AI's flagship open model. Excels at instruction-following, summarization, and structured outputs.
+            </p>
+            <span class="port">Port 7862</span>
+        </a>
+
+        <a class="card" href="http://localhost:7863" target="_blank">
+            <span class="icon">✨</span>
+            <h2>Gemma Agent</h2>
+            <span class="model-tag">gemma3:4b</span>
+            <p>Google DeepMind's lightweight model. Optimized for efficiency with strong multilingual and coding
+                capabilities.</p>
+            <span class="port">Port 7863</span>
+        </a>
+    </div>
+
+    <div class="footer">
+        All models run 100% locally via Ollama — no data leaves your machine.
+    </div>
+</body>
+
+</html>

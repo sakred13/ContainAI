@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Locallama | Agentic AI</title>
+    <link rel="stylesheet" href="static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Fira+Code&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="model-selector">
+            <label>Interface Mode</label>
+            <div class="mode-switch">
+                <button class="mode-btn active" id="mode-chat">💬 Chat</button>
+                <button class="mode-btn" id="mode-sim">🎭 Simulation</button>
+            </div>
+
+            <label for="model-select">Active Model</label>
+            <select id="model-select">
+                <option value="llama3.2">llama3.2</option>
+            </select>
+            
+            <div class="status-badge">
+                <div class="status-dot"></div>
+                System Online
+            </div>
+        </div>
+
+        <div class="history-list" id="history-list">
+            <label>Recent Chats</label>
+            <div class="history-item active">New Conversation</div>
+            <!-- More history items will appear here -->
+        </div>
+
+        <div style="margin-top: auto; font-size: 0.7rem; color: var(--text-muted); opacity: 0.5;">
+            v2.0 | Agentic Framework
+        </div>
+    </aside>
+
+    <main class="chat-container">
+        <div class="messages-wrapper" id="chat-box">
+            <!-- Messages appear here -->
+            <div style="text-align: center; margin-top: 20%; color: var(--text-muted);">
+                <h2 style="color: var(--text-main); margin-bottom: 0.5rem;">Welcome to Locallama</h2>
+                <p>Start a new agentic session. All computation is local.</p>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-wrapper">
+                <textarea id="user-input" placeholder="Type a message or give a command..." rows="1"></textarea>
+                <button class="send-btn" id="send-btn">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <script src="static/js/main.js"></script>
+</body>
+</html>

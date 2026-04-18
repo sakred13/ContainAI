@@ -1,0 +1,9 @@
+requests
+flask
+langchain>=0.3,<0.4
+langchain-ollama>=0.2,<0.3
+langchain-community>=0.3,<0.4
+langgraph>=0.2,<0.3
+beautifulsoup4
+wikipedia
+googlesearch-python

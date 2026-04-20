@@ -26,16 +26,51 @@ services:
       - "7860:7860"
     volumes:
       - ./gateway:/app
-      - conversation_data:/data/conversations
+      - ./conversations:/data/conversations
     depends_on:
       - agent_llama
-      - agent_mistral
+      - agent_llama_8b
       - agent_gemma
       - agent_qwen
       - agent_dolphin
       - agent_deepseek
     restart: unless-stopped
 
+  # ---- AGENT: Llama 3.2 ----
+  agent_llama:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: agent_llama
+    environment: &agent_env
+      OLLAMA_BASE_URL: http://ollama:11434
+      AGENT_LLAMA_URL: http://agent_llama:5000
+      AGENT_LLAMA8B_URL: http://agent_llama_8b:5000
+      AGENT_GEMMA_URL: http://agent_gemma:5000
+      AGENT_QWEN_URL: http://agent_qwen:5000
+      AGENT_DOLPHIN_URL: http://agent_dolphin:5000
+      AGENT_DEEPSEEK_URL: http://agent_deepseek:5000
+      MODEL_NAME: llama3.2
+    volumes:
+      - ./agent:/app
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  # ---- AGENT: Llama 3.1 8B ----
+  agent_llama_8b:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: agent_llama_8b
+    environment:
+      <<: *agent_env
+      MODEL_NAME: llama3.1
+    volumes:
+      - ./agent:/app
+    depends_on:
+      - ollama
+    restart: unless-stopped
   # ---- MODERN_UI: Custom Premium Frontend (Glassmorphism & HTML proxy) ----
   modern_ui:
     build:
@@ -46,65 +81,35 @@ services:
       - "8080:8080"
     volumes:
       - ./modern_ui:/app
-      - conversation_data:/data/conversations
+      - ./conversations:/data/conversations
     environment:
-      - CONVERSATIONS_DIR=/data/conversations
-      - AGENT_LLAMA_URL=http://agent_llama:5000
-      - AGENT_MISTRAL_URL=http://agent_mistral:5000
-      - AGENT_GEMMA_URL=http://agent_gemma:5000
-      - AGENT_QWEN_URL=http://agent_qwen:5000
-      - AGENT_DOLPHIN_URL=http://agent_dolphin:5000
-      - AGENT_DEEPSEEK_URL=http://agent_deepseek:5000
+      CONVERSATIONS_DIR: /data/conversations
+      AGENT_LLAMA_URL: http://agent_llama:5000
+      AGENT_LLAMA8B_URL: http://agent_llama_8b:5000
+      AGENT_GEMMA_URL: http://agent_gemma:5000
+      AGENT_QWEN_URL: http://agent_qwen:5000
+      AGENT_DOLPHIN_URL: http://agent_dolphin:5000
+      AGENT_DEEPSEEK_URL: http://agent_deepseek:5000
     depends_on:
       - agent_llama
-      - agent_mistral
+      - agent_llama_8b
       - agent_gemma
       - agent_qwen
       - agent_dolphin
       - agent_deepseek
     restart: unless-stopped
 
-  # ---- AGENT: Llama 3.2 ----
-  agent_llama:
-    build:
-      context: ./base_agent
-      dockerfile: Dockerfile
-    container_name: agent_llama
-    environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - MODEL_NAME=llama3.2
-    volumes:
-      - ./base_agent:/app
-    depends_on:
-      - ollama
-    restart: unless-stopped
-
-  # ---- AGENT: Mistral ----
-  agent_mistral:
-    build:
-      context: ./base_agent
-      dockerfile: Dockerfile
-    container_name: agent_mistral
-    environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - MODEL_NAME=mistral
-    volumes:
-      - ./base_agent:/app
-    depends_on:
-      - ollama
-    restart: unless-stopped
-
   # ---- AGENT: Gemma 3 4B ----
   agent_gemma:
     build:
-      context: ./base_agent
+      context: ./agent
       dockerfile: Dockerfile
     container_name: agent_gemma
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - MODEL_NAME=gemma3:4b
+      <<: *agent_env
+      MODEL_NAME: gemma3:4b
     volumes:
-      - ./base_agent:/app
+      - ./agent:/app
     depends_on:
       - ollama
     restart: unless-stopped
@@ -112,14 +117,14 @@ services:
   # ---- AGENT: Qwen 2.5 Coder (Coding Specialist) ----
   agent_qwen:
     build:
-      context: ./base_agent
+      context: ./agent
       dockerfile: Dockerfile
     container_name: agent_qwen
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - MODEL_NAME=qwen2.5-coder
+      <<: *agent_env
+      MODEL_NAME: qwen2.5-coder
     volumes:
-      - ./base_agent:/app
+      - ./agent:/app
     depends_on:
       - ollama
     restart: unless-stopped
@@ -127,14 +132,14 @@ services:
   # ---- AGENT: Dolphin Mistral (Uncensored Variant) ----
   agent_dolphin:
     build:
-      context: ./base_agent
+      context: ./agent
       dockerfile: Dockerfile
     container_name: agent_dolphin
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - MODEL_NAME=dolphin-mistral
+      <<: *agent_env
+      MODEL_NAME: dolphin-mistral
     volumes:
-      - ./base_agent:/app
+      - ./agent:/app
     depends_on:
       - ollama
     restart: unless-stopped
@@ -142,18 +147,17 @@ services:
   # ---- AGENT: DeepSeek R1 7B (Reasoning Model) ----
   agent_deepseek:
     build:
-      context: ./base_agent
+      context: ./agent
       dockerfile: Dockerfile
     container_name: agent_deepseek
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - MODEL_NAME=deepseek-r1:7b
+      <<: *agent_env
+      MODEL_NAME: deepseek-r1:7b
     volumes:
-      - ./base_agent:/app
+      - ./agent:/app
     depends_on:
       - ollama
     restart: unless-stopped
 
 volumes:
   ollama_data:
-  conversation_data:

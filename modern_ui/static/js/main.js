@@ -48,6 +48,8 @@ document.addEventListener('DOMContentLoaded', () => {
         modelSelect.value = data.model || modelSelect.value;
         currentMode = data.type || 'chat';
         
+        modelSelect.disabled = (currentMode === 'simulation' || currentMode === 'sim');
+
         modeChat.classList.toggle('active', currentMode === 'chat');
         modeSim.classList.toggle('active', currentMode === 'sim');
 
@@ -68,6 +70,13 @@ document.addEventListener('DOMContentLoaded', () => {
         modeChat.classList.toggle('active', mode === 'chat');
         modeSim.classList.toggle('active', mode === 'sim');
         
+        if (mode === 'sim') {
+            modelSelect.value = "llama3.1:8b";
+            modelSelect.disabled = true;
+        } else {
+            modelSelect.disabled = false;
+        }
+
         // Clear UI for new mode
         chatBox.innerHTML = `
             <div style="text-align: center; margin-top: 20%; color: var(--text-muted);">
@@ -121,21 +130,39 @@ document.addEventListener('DOMContentLoaded', () => {
         toolDiv.innerHTML = `
             <div class="tool-header">
                 <span>🛠️</span> <strong>${name}</strong>
+                <em class="tool-chevron">▼</em>
             </div>
-            <div class="tool-output">Calling with: ${input}</div>
+            <div class="tool-body">
+                <div class="tool-body-inner">
+                    <div class="tool-section-label">Input</div>
+                    <div class="tool-output">${input || '…'}</div>
+                    <div class="tool-section-label result-label" style="display:none">Result</div>
+                    <div class="tool-result"></div>
+                </div>
+            </div>
         `;
+        toolDiv.querySelector('.tool-header').addEventListener('click', () => {
+            toolDiv.classList.toggle('open');
+        });
         chatBox.appendChild(toolDiv);
         chatBox.scrollTop = chatBox.scrollHeight;
-        return toolDiv.querySelector('.tool-output');
+        return {
+            toolDiv,
+            resultEl: toolDiv.querySelector('.tool-result'),
+            resultLabel: toolDiv.querySelector('.result-label'),
+        };
     };
 
     // --- API CALLS ---
     const streamChat = async (message) => {
         currentConversation.push({ role: 'user', content: message });
         
-        const userBubble = addMessage('user', message);
-        const aiBubble = addMessage('ai', '');
+        addMessage('user', message);
+        // AI bubble is created lazily on the first token so that tool
+        // call blocks (tool_start) are always inserted above it.
+        let aiBubble = null;
         let aiContent = "";
+        let lastTool = null; // track current tool block for tool_end
 
         const response = await fetch('/api/chat', {
             method: 'POST',
@@ -164,16 +191,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 try {
                     const data = JSON.parse(line);
                     if (data.type === 'token') {
+                        // Create the bubble on the very first token (after any tool blocks)
+                        if (!aiBubble) aiBubble = addMessage('ai', '');
                         aiContent += data.content;
                         aiBubble.innerHTML = marked.parse(aiContent);
                         chatBox.scrollTop = chatBox.scrollHeight;
                     } else if (data.type === 'tool_start') {
-                        addToolLog(data.name, data.input || '...');
+                        // Appended now — before the AI bubble exists
+                        lastTool = addToolLog(data.name, data.input || '...');
+                    } else if (data.type === 'tool_end') {
+                        if (lastTool) {
+                            lastTool.resultEl.textContent = data.output || '';
+                            lastTool.resultLabel.style.display = 'block';
+                            // rAF ensures the browser paints the collapsed state first,
+                            // so the grid-template-rows transition fires correctly.
+                            requestAnimationFrame(() => lastTool.toolDiv.classList.add('open'));
+                        }
                     }
                 } catch (e) {}
             }
         }
         
+        // Guard: if the model returned no tokens at all, add an empty bubble
+        if (!aiBubble) addMessage('ai', '(No response)');
         currentConversation.push({ role: 'assistant', content: aiContent });
         fetchHistory(); // Refresh sidebar
     };
@@ -210,9 +250,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (data.type === 'status') {
                         addStatus(data.content);
                     } else if (data.type === 'agent_message') {
-                        addMessage('ai', data.content, `🎭 ${data.agent} (Round ${data.round})`);
+                        const modelTag = data.model ? `(${data.model}) ` : "";
+                        const personaTag = data.persona ? ` — *${data.persona}*` : "";
+                        addMessage('ai', data.content, `🎭 ${data.agent} ${modelTag}${personaTag} (Round ${data.round})`);
                     } else if (data.type === 'tool_event') {
-                        addToolLog(data.agent, data.content);
+                        // content already includes both input and output — show expanded
+                        const tool = addToolLog(data.agent, data.content);
+                        requestAnimationFrame(() => tool.toolDiv.classList.add('open'));
                     } else if (data.type === 'error') {
                         addStatus(`❌ Error: ${data.content}`);
                     }
@@ -227,7 +271,7 @@ document.addEventListener('DOMContentLoaded', () => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                model: modelSelect.value,
+                model: currentMode === 'sim' ? 'llama3.1:8b' : modelSelect.value,
                 convo_id: currentConvoId,
                 text: text
             })

@@ -12,7 +12,7 @@ CONVERSATIONS_DIR = os.getenv("CONVERSATIONS_DIR", "/data/conversations")
 os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
 MODEL_REGISTRY = {
     "llama3.2": os.getenv("AGENT_LLAMA_URL", "http://agent_llama:5000"),
-    "mistral": os.getenv("AGENT_MISTRAL_URL", "http://agent_mistral:5000"),
+    "llama3.1:8b": os.getenv("AGENT_LLAMA8B_URL", "http://agent_llama_8b:5000"),
     "gemma3:4b": os.getenv("AGENT_GEMMA_URL", "http://agent_gemma:5000"),
     "qwen2.5-coder": os.getenv("AGENT_QWEN_URL", "http://agent_qwen:5000"),
     "dolphin-mistral": os.getenv("AGENT_DOLPHIN_URL", "http://agent_dolphin:5000"),
@@ -74,7 +74,9 @@ def chat():
     
     agent_url = MODEL_REGISTRY.get(model)
     if not agent_url:
-        return jsonify({"error": "Invalid model"}), 400
+        return jsonify({"error": f"Invalid model '{model}'. Valid models: {list(MODEL_REGISTRY.keys())}"}), 400
+
+    print(f"[ROUTE] model='{model}' → {agent_url}", flush=True)
 
     def generate():
         try:
@@ -93,13 +95,13 @@ def chat():
 @app.route('/api/orchestrate', methods=['POST'])
 def orchestrate():
     data = request.json
-    model = data.get('model')
+    model = "llama3.1:8b"
     prompt = data.get('prompt')
     convo_id = data.get('convo_id')
     
     agent_url = MODEL_REGISTRY.get(model)
     if not agent_url:
-        return jsonify({"error": "Invalid model"}), 400
+        return jsonify({"error": "Orchestrator model (llama3.1:8b) not online"}), 500
 
     def generate():
         history_buffer = [{"role": "user", "content": prompt}]

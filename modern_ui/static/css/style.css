@@ -75,6 +75,7 @@ select {
     transition: border-color 0.2s;
 }
 
+select:focus {
     border-color: var(--accent);
 }
 
@@ -208,7 +209,6 @@ select {
     background: var(--tool-bg);
     border: 1px solid #312e81;
     border-radius: 8px;
-    padding: 0.75rem;
     margin: 0.5rem 0;
     font-family: 'Fira Code', monospace;
     font-size: 0.8rem;
@@ -219,14 +219,74 @@ select {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-bottom: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+    border-radius: 8px;
+}
+
+.tool-header:hover {
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.tool-chevron {
+    margin-left: auto;
+    font-style: normal;
+    font-size: 0.65rem;
+    opacity: 0.6;
+    transition: transform 0.2s ease;
+}
+
+.tool-call.open .tool-chevron {
+    transform: rotate(180deg);
+}
+
+/* Grid trick: transitions between 0fr and 1fr are reliable unlike max-height */
+.tool-body {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.25s ease;
+}
+
+.tool-call.open .tool-body {
+    grid-template-rows: 1fr;
+}
+
+.tool-body-inner {
+    overflow: hidden;
+    padding: 0 0.75rem;
+}
+
+.tool-call.open .tool-body-inner {
+    padding-bottom: 0.75rem;
+}
+
+.tool-section-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #4f46e5;
+    margin-bottom: 0.3rem;
+    margin-top: 0.5rem;
 }
 
 .tool-output {
     color: #94a3b8;
     white-space: pre-wrap;
-    padding-left: 1rem;
+    padding: 0.4rem 0.6rem;
     border-left: 2px solid #312e81;
+    background: rgba(0,0,0,0.2);
+    border-radius: 0 4px 4px 0;
+}
+
+.tool-result {
+    color: #6ee7b7;
+    white-space: pre-wrap;
+    padding: 0.4rem 0.6rem;
+    border-left: 2px solid #065f46;
+    background: rgba(0,0,0,0.2);
+    border-radius: 0 4px 4px 0;
 }
 
 /* Input Area */

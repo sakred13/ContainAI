@@ -1,0 +1,581 @@
+"""
+orchestrator_agent/routes.py
+-----------------------------
+Flask Blueprint for /orchestrate and /interject endpoints.
+
+The orchestrator parses a scenario prompt, spawns virtual agents with role-
+aware system prompts, and runs a multi-round conversation loop until all
+agents signal [CONCLUSION_MET] or one signals APPROVED.
+
+Interjection state is kept in a module-level defaultdict so it is shared
+across all requests within the same process.
+"""
+
+import json
+import re
+import time
+
+import os
+import requests
+from collections import defaultdict
+from flask import Blueprint, request, Response
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+from common.llm_client import llm, agent_executor, tools, MODEL_NAME
+
+# ---------------------------------------------------------------------------
+# Model Registry for Dispatch
+# ---------------------------------------------------------------------------
+MODEL_URLs = {
+    "llama3.2": os.getenv("AGENT_LLAMA_URL", "http://agent_llama:5000"),
+    "llama3.1:8b": os.getenv("AGENT_LLAMA8B_URL", "http://agent_llama_8b:5000"),
+    "gemma3:4b": os.getenv("AGENT_GEMMA_URL", "http://agent_gemma:5000"),
+    "qwen2.5-coder": os.getenv("AGENT_QWEN_URL", "http://agent_qwen:5000"),
+    "dolphin-mistral": os.getenv("AGENT_DOLPHIN_URL", "http://agent_dolphin:5000"),
+    "deepseek-r1:7b": os.getenv("AGENT_DEEPSEEK_URL", "http://agent_deepseek:5000"),
+}
+
+MODEL_STRENGTHS = (
+    "- llama3.1:8b: Versatile, great for general conversation and maintaining consistent personalities.\n"
+    "- deepseek-r1:7b: Exceptional reasoning, logic, and multi-step strategy. Use for thinkers or problem solvers.\n"
+    "- dolphin-mistral: Uncensored, cooperative. Use for edgy, creative, or rebel personalities.\n"
+    "- qwen2.5-coder: Python and technical expert. Use for programmers or math-heavy roles.\n"
+    "- gemma3:4b: Safe and structured. Use for polite, professional, or moderator roles.\n"
+    "- llama3.2: Very fast. Use for minor roles or simple conversationalists."
+)
+
+# ---------------------------------------------------------------------------
+# Blueprint & shared interjection store
+# ---------------------------------------------------------------------------
+orchestrator_bp = Blueprint("orchestrator", __name__)
+
+# Maps convo_id → list of pending user interjection strings
+sim_interjections: defaultdict[str, list] = defaultdict(list)
+
+# ---------------------------------------------------------------------------
+# Scenario parsing
+# ---------------------------------------------------------------------------
+PARSE_PROMPT = (
+    "Extract simulation details as JSON. You MUST output ONLY a valid JSON object with the following keys:\n"
+    "1. 'agents': A list of objects with 'name', 'personality', 'role_objective', and 'model'.\n"
+    "   - 'role_objective': Specific directions extracted for THIS agent ONLY from the prompt.\n"
+    "   - 'model' assignment guide: " + MODEL_STRENGTHS + "\n"
+    "2. 'rounds': Number of rounds (integer).\n"
+    "3. 'scenario': A detailed 1-sentence summary of the interaction.\n"
+    "4. 'opener': The EXACT first line the first agent should say to trigger the task.\n\n"
+    "EXAMPLE OUTPUT:\n"
+    '{"agents": [{"name": "ALICE", "personality": "hacker", "role_objective": "Hack the firewall.", "model": "dolphin-mistral"}, '
+    '{"name": "BOB", "personality": "lawyer", "role_objective": "Defend the company in court.", "model": "gemma3:4b"}], '
+    '"rounds": 5, "scenario": "A hacker tries to breach a law firm.", "opener": "I am in the main frame."}\n\n'
+    "Now extract from this: "
+)
+
+
+def parse_scenario_fallback(prompt: str) -> dict | None:
+    """Regex-based fallback parser when the LLM fails to produce valid JSON."""
+    name_pattern = r"\b([A-Z]{2,}[A-Z]*)\b"
+    names = list(set(re.findall(name_pattern, prompt)))
+    stop_words = {
+        "THE", "AND", "FOR", "WANT", "BETWEEN", "EACH", "OTHER",
+        "ROUND", "ROUNDS", "YEAR", "OLD", "WHO",
+    }
+    names = [n for n in names if n not in stop_words]
+
+    rounds_match = re.search(r"(\d+)\s*round", prompt, re.IGNORECASE)
+    rounds = int(rounds_match.group(1)) if rounds_match else 5
+
+    if len(names) < 2:
+        return None
+
+    agents = []
+    for name in names:
+        personality_match = re.search(
+            rf"{name}\s+(?:is\s+)?(.{{10,60}}?)(?:\.|,|and\s+[A-Z]|$)",
+            prompt,
+            re.IGNORECASE,
+        )
+        personality = (
+            personality_match.group(1).strip()
+            if personality_match
+            else f"a participant named {name}"
+        )
+        # Default fallback to Llama 8B
+        agents.append({"name": name, "personality": personality, "model": "llama3.1:8b"})
+
+    return {
+        "agents": agents,
+        "rounds": rounds,
+        "scenario": prompt,
+        "opener": "Alright, let's get this started!",
+    }
+
+
+def _parse_scenario(scenario_prompt: str):
+    """
+    Try LLM-based JSON parsing first, then fall back to regex.
+    Returns (config_dict | None, raw_llm_output_str).
+    """
+    parse_response = llm.invoke([HumanMessage(content=PARSE_PROMPT + scenario_prompt)])
+    raw = parse_response.content.strip()
+
+    # Strip markdown code fences if present
+    if "```" in raw:
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if json_match:
+        raw = json_match.group(0)
+
+    config = None
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    if not config or len(config.get("agents", [])) < 2:
+        config = parse_scenario_fallback(scenario_prompt)
+
+    return config, raw
+
+
+# ---------------------------------------------------------------------------
+# Per-agent turn logic
+# ---------------------------------------------------------------------------
+TOOL_ROLES = {"REVIEWER", "TESTER", "QA", "VERIFIER", "VALIDATOR", "EXECUTOR"}
+
+
+def _build_agent_system(agent: dict, agents: list, scenario: str, i: int) -> str:
+    agent_name = agent.get("name", f"Agent_{i+1}")
+    personality = agent.get("personality", "A participant in the scenario")
+    role_objective = agent.get("role_objective", "Participate in the scenario.")
+
+    other_agents = [
+        a.get("name", f"Agent_{j+1}") for j, a in enumerate(agents) if j != i
+    ]
+    is_tool_agent = agent_name.upper() in TOOL_ROLES
+
+    system = (
+        f"CRITICAL ROLEPLAY INSTRUCTION: You are strictly playing the role of {agent_name}.\n\n"
+        f"YOUR PERSONALITY AND EXPERTISE:\n{personality}\n\n"
+        f"YOUR SPECIFIC OBJECTIVE FOR THIS SCENARIO:\n{role_objective}\n\n"
+        f"You are interacting with: {', '.join(other_agents)}.\n\n"
+        f"RULES:\n"
+        f"1. You MUST act, speak, and think entirely as {agent_name}.\n"
+        f"2. You MUST focus ONLY on your specific objective. Do not try to do the jobs of the other agents.\n"
+        f"3. Respond ONLY in the FIRST PERSON. Do NOT describe your actions or narrate.\n"
+        f"4. Do NOT drop character or break the fourth wall. Only speak the exact words your agent would say in a natural conversation.\n"
+        f"5. Do NOT spiral into endless discussion. Put your thoughts forward efficiently and actively push for a conclusion.\n\n"
+        "IMPORTANT TERMINATION CLAUSE: If you have reached an agreement, if you have nothing new to add, "
+        "if you are just thanking the others or wrapping up, OR if you notice the conversation "
+        "is going in circles, you MUST append the exact signal [CONCLUSION_MET] to your response to end the scenario."
+    )
+
+    if "code" in personality.lower() or "programmer" in personality.lower() or "coder" in personality.lower():
+        system += "\n\nCRITICAL CODING RULE: Whenever you write or share code, you MUST wrap it in Markdown code blocks (```python ... ```)."
+
+
+    if is_tool_agent:
+        system += (
+            "\n\nIMPORTANT: You have access to the 'execute_python_code' tool. "
+            "When code is presented to you for review, you MUST use the execute_python_code tool "
+            "to actually run it and verify the output is correct. "
+            "If the code runs correctly and produces the expected output, you can output APPROVED."
+        )
+
+    return system, agent_name, is_tool_agent
+
+
+def _dispatch_agent_turn(agent_name: str, model_key: str, system_msg: str, conversation_history: list, round_num: int, instruction: str, convo_id: str):
+    """
+    Send the turn to the specific model's /chat endpoint.
+    Returns (reply_text, list_of_json_events).
+    """
+    target_url = MODEL_URLs.get(model_key, MODEL_URLs["llama3.1:8b"])
+    
+    # Format messages for the worker's /chat endpoint
+    payload_msgs = [{"role": "system", "content": system_msg}]
+    for entry in conversation_history:
+        role = "assistant" if entry["agent"] == agent_name else "user"
+        content = entry["text"]
+        if entry["agent"] == "HUMAN":
+            content = f"***[HUMAN USER OVERRIDE]***: {content}"
+        elif role == "user":
+            content = f"[{entry['agent']}]: {content}"
+            
+        # Merge consecutive messages of the same role to strictly alternate user/assistant
+        if payload_msgs[-1]["role"] == role:
+            payload_msgs[-1]["content"] += f"\n\n{content}"
+        else:
+            payload_msgs.append({"role": role, "content": content, "name": entry.get("agent", "Unknown")})
+    
+    # Add the specific turn instruction (e.g. Opener or 'Your turn')
+    if payload_msgs[-1]["role"] == "user":
+        payload_msgs[-1]["content"] += f"\n\n{instruction}"
+    else:
+        payload_msgs.append({"role": "user", "content": instruction})
+    
+    # --- LOG THE REQUEST TO CONSOLE ---
+    print(f"\n{'='*60}", flush=True)
+    print(f"ROUND {round_num} - DISPATCHING TO: {agent_name} ({model_key})", flush=True)
+    print(f"TARGET URL: {target_url}/chat", flush=True)
+    print(f"--- PAYLOAD SENT ---", flush=True)
+    print(json.dumps(payload_msgs, indent=2), flush=True)
+    
+    events = []
+    full_reply = ""
+    
+    try:
+        resp = requests.post(f"{target_url}/chat", json={"messages": payload_msgs}, stream=True, timeout=180)
+        for line in resp.iter_lines():
+            if not line: continue
+            data = json.loads(line)
+            if data["type"] == "token":
+                full_reply += data["content"]
+            elif data["type"] == "tool_start":
+                events.append(json.dumps({
+                    "type": "tool_event",
+                    "agent": f"{agent_name} ({model_key})",
+                    "round": round_num,
+                    "content": f"🛠️ **{agent_name}** is starting tool `{data['name']}` with input: `{data['input']}`"
+                }) + "\n")
+            elif data["type"] == "tool_end":
+                events.append(json.dumps({
+                    "type": "tool_event",
+                    "agent": f"{agent_name} ({model_key})",
+                    "round": round_num,
+                    "content": f"✅ **Tool output:**\n```\n{data['output']}\n```"
+                }) + "\n")
+                
+        # --- LOG THE RESPONSE TO CONSOLE ---
+        print(f"\n--- CONTINUOUS TOOL EVENTS ---", flush=True)
+        for e in events: 
+            print(e.strip(), flush=True)
+        print(f"\n--- FINAL TEXT OUTPUT ---\n{full_reply.strip()}", flush=True)
+        print(f"{'='*60}\n", flush=True)
+
+        return full_reply.strip(), events
+    except Exception as e:
+        error_msg = f"Error calling model {model_key}: {str(e)}"
+        print(f"\n--- CRASH/ERROR ---\n{error_msg}\n{'='*60}\n", flush=True)
+        return error_msg, []
+
+
+def _try_manual_tool(reply: str, agent_name: str, round_num: int):
+    """
+    Scan reply for a bare JSON tool call block (`{"name": ..., "arguments": ...}`).
+    If found, execute the tool and return (updated_reply, extra_events).
+    """
+    tool_map = {t.name: t for t in tools}
+    extra_events = []
+
+    start_idx = reply.find("{")
+    end_idx = reply.rfind("}")
+    if start_idx == -1 or end_idx == -1:
+        return reply, extra_events
+
+    tool_data = None
+    current_end = end_idx
+    while current_end > start_idx:
+        try:
+            tool_data = json.loads(reply[start_idx:current_end + 1])
+            break
+        except Exception:
+            current_end = reply.rfind("}", start_idx, current_end)
+
+    if not (isinstance(tool_data, dict) and "name" in tool_data and "arguments" in tool_data):
+        return reply, extra_events
+
+    try:
+        t_name = tool_data.get("name")
+        t_args = tool_data.get("arguments", tool_data)
+        if "name" in t_args:
+            del t_args["name"]
+
+        # Guard: if the model passed a JSON schema dict instead of a scalar value,
+        # extract the 'description' field as the actual argument value.
+        def _coerce(v):
+            if isinstance(v, dict) and ("type" in v or "description" in v):
+                return v.get("description", str(v))
+            return v
+        t_args = {k: _coerce(v) for k, v in t_args.items()}
+
+        if t_name not in tool_map:
+            return reply, extra_events
+
+        t_input_str = str(list(t_args.values())[0]) if t_args else ""
+        extra_events.append(json.dumps({
+            "type": "tool_event",
+            "agent": agent_name,
+            "round": round_num,
+            "content": (
+                f"🛠️ **{agent_name}** is manually running tool `{t_name}` with input:\n"
+                f"```\n{t_input_str[:200]}\n```"
+            ),
+        }) + "\n")
+
+        tool_result = tool_map[t_name].invoke(t_args)
+
+        extra_events.append(json.dumps({
+            "type": "tool_event",
+            "agent": agent_name,
+            "round": round_num,
+            "content": f"✅ **Tool output:**\n```\n{str(tool_result)[:500]}\n```",
+        }) + "\n")
+
+        reply += f"\n\n*(Agent executed tool `{t_name}`. Output: {str(tool_result)[:500]})*"
+    except Exception as pe:
+        print("Failed to execute parsed tool:", pe)
+
+    return reply, extra_events
+
+
+# ---------------------------------------------------------------------------
+# Pacing / HITL wait helper
+# ---------------------------------------------------------------------------
+def _pacing_wait(
+    waiting_for_user: bool,
+    convo_id: str,
+    agent_name: str,
+    round_num: int,
+):
+    """Block until user input arrives (if needed) or ~2.5 s have elapsed."""
+    pacing_steps = 0
+    max_pacing = 25  # × 0.1 s = 2.5 s
+
+    while True:
+        has_pause = any("PAUSE" in str(x).upper() for x in sim_interjections[convo_id])
+
+        if waiting_for_user or has_pause:
+            time.sleep(0.5)
+            if sim_interjections[convo_id]:
+                waiting_for_user = False
+                sim_interjections[convo_id] = [
+                    x for x in sim_interjections[convo_id]
+                    if "PAUSE" not in str(x).upper()
+                ]
+                break
+            continue
+        else:
+            time.sleep(0.1)
+            pacing_steps += 1
+            if pacing_steps >= max_pacing or sim_interjections[convo_id]:
+                break
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@orchestrator_bp.route("/interject", methods=["POST"])
+def interject():
+    """Push a user message into a running simulation by convo_id."""
+    data = request.get_json(force=True, silent=True) or {}
+    convo_id = data.get("convo_id")
+    text = data.get("text")
+    if convo_id and text:
+        sim_interjections[convo_id].append(text)
+    return {"status": "ok"}
+
+
+@orchestrator_bp.route("/orchestrate", methods=["POST"])
+def orchestrate():
+    """Parse a scenario prompt, create agents, and run a multi-round conversation."""
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return {"error": "Request body must be valid JSON"}, 400
+
+    scenario_prompt = data.get("prompt", "")
+    convo_id = data.get("convo_id", "default_sim")
+
+    def generate():
+        # ------------------------------------------------------------------ #
+        # Step 1: Parse the scenario
+        # ------------------------------------------------------------------ #
+        yield json.dumps({"type": "status", "content": "🎭 Parsing scenario..."}) + "\n"
+
+        config, raw = _parse_scenario(scenario_prompt)
+        print(f"[orchestrate] LLM parse output: {raw}", flush=True)
+
+        if not config or len(config.get("agents", [])) < 2:
+            yield json.dumps({
+                "type": "error",
+                "content": (
+                    f"Could not identify at least 2 agents. Try using ALL CAPS names "
+                    f"(e.g. ALICE, BOB).\n\nLLM returned:\n```\n{raw}\n```"
+                ),
+            }) + "\n"
+            return
+
+        agents = config.get("agents", [])
+        
+        # User requested to forcefully assign Llama to tool-using agents
+        for a in agents:
+            if a.get("name", "").upper() in TOOL_ROLES:
+                a["model"] = "llama3.1:8b"
+                
+        rounds = config.get("rounds", 5)
+
+        if not isinstance(rounds, int):
+            rounds = 5
+        scenario = config.get("scenario", "")
+        opener = config.get("opener", "Let's get started!")
+
+        if len(agents) < 2:
+            yield json.dumps({
+                "type": "error",
+                "content": "Need at least 2 agents for a multi-agent scenario.",
+            }) + "\n"
+            return
+
+        agent_names = [a["name"] for a in agents]
+
+        yield json.dumps({
+            "type": "status",
+            "content": (
+                f"🎭 Setting up **{len(agents)} agents**: {', '.join(agent_names)}\n\n"
+                f"**Scenario:** {scenario}\n\n"
+                "*Simulation runs until all agents agree the conclusion is met.*"
+            ),
+        }) + "\n"
+
+        # ------------------------------------------------------------------ #
+        # Step 2: Multi-agent loop
+        # ------------------------------------------------------------------ #
+        conversation_history: list[dict] = []
+        approved = False
+        round_num = 1
+        last_replies: dict[str, str] = {}
+        WRAP_UP_PHRASES = [
+            "agree to disagree", "thank you for this discussion",
+            "thanks for the conversation", "no further points", "was a pleasure",
+            "end of discussion", "nothing more to add", "my final word",
+            "let's politely end", "completely agree with you",
+            "couldn't agree more", "we are in agreement", "i agree with you",
+        ]
+
+        while True:
+            if approved:
+                break
+
+            conclusions_this_round = 0
+
+            for i, agent in enumerate(agents):
+                if approved:
+                    break
+
+                system, agent_name, is_tool_agent = _build_agent_system(agent, agents, scenario, i)
+
+                # ---- Flush pending user interjections ---- #
+                while sim_interjections[convo_id]:
+                    user_text = sim_interjections[convo_id].pop(0)
+                    conversation_history.append(
+                        {"agent": "HUMAN", "text": user_text, "round": round_num}
+                    )
+                    yield json.dumps({
+                        "type": "agent_message",
+                        "agent": "🧑‍💻 YOU",
+                        "round": round_num,
+                        "content": user_text,
+                    }) + "\n"
+
+                # ---- Generate reply via Dispatch ----
+                if not conversation_history:
+                    turn_instruction = f"SYSTEM INSTRUCTION: You are the first to speak. Kick off the scenario by making your opening statement. Provide any code, data, or context required by your {agent.get('personality')} persona to start the task."
+                else:
+                    turn_instruction = f"SYSTEM INSTRUCTION: It is your turn to speak. React to the conversation history as {agent_name} based on your {agent.get('personality')} persona. Do not offer to help like an AI assistant. Just play the role."
+
+                model_key = agent.get("model", "llama3.1:8b")
+                reply, dispatch_events = _dispatch_agent_turn(
+                    agent_name, model_key, system, conversation_history, round_num, turn_instruction, convo_id
+                )
+                for event in dispatch_events:
+                    yield event
+
+                # Catch unformatted bare JSON tool calls that bypassed worker XML parsing
+                reply, extra_events = _try_manual_tool(reply, agent_name, round_num)
+                for event in extra_events:
+                    yield event
+
+                # Strip self-prefix (e.g. "[ALICE]: " or "ALICE: ")
+                for prefix in (f"[{agent_name}]:", f"{agent_name}:"):
+                    if reply.startswith(prefix):
+                        reply = reply[len(prefix):].strip()
+                        break
+
+                # ---- Conclusion detection ---- #
+                is_concluding = "[CONCLUSION_MET]" in reply.upper()
+                if not is_concluding and any(p in reply.lower() for p in WRAP_UP_PHRASES):
+                    is_concluding = True
+                    reply += " [CONCLUSION_MET]"
+
+                prev_reply = last_replies.get(agent_name, "")
+                if (
+                    not is_concluding
+                    and prev_reply
+                    and len(reply) > 10
+                    and (reply in prev_reply or prev_reply in reply)
+                ):
+                    is_concluding = True
+                    reply += " [CONCLUSION_MET] (Repetition Detected)"
+
+                last_replies[agent_name] = reply
+                if is_concluding:
+                    conclusions_this_round += 1
+
+                conversation_history.append({"agent": agent_name, "text": reply, "round": round_num})
+
+                yield json.dumps({
+                    "type": "agent_message",
+                    "agent": agent_name,
+                    "model": model_key,
+                    "persona": agent.get("personality", "Participant"),
+                    "round": round_num,
+                    "content": reply,
+                }) + "\n"
+
+                if "APPROVED" in reply.upper():
+                    approved = True
+                    break
+
+                # ---- HITL pacing ---- #
+                # We only pause for the human if the agent explicitly tags @USER
+                waiting_for_user = "@USER" in reply.upper()
+                if waiting_for_user:
+                    yield json.dumps({
+                        "type": "status",
+                        "content": f"⏸️ **{agent_name}** is waiting for your input. Use the interject box above to reply!",
+                    }) + "\n"
+
+                _pacing_wait(waiting_for_user, convo_id, agent_name, round_num)
+
+            # Did every agent conclude this round?
+            if conclusions_this_round == len(agents):
+                yield json.dumps({
+                    "type": "status",
+                    "content": "\n\n🛑 **All agents have signaled the conclusion is met.**",
+                }) + "\n"
+                break
+
+            round_num += 1
+
+        if approved:
+            yield json.dumps({
+                "type": "status",
+                "content": (
+                    f"\n\n✅ **{agent_names[-1]} APPROVED the result!** "
+                    f"Simulation ended after {round_num} rounds."
+                ),
+            }) + "\n"
+        else:
+            yield json.dumps({
+                "type": "status",
+                "content": (
+                    f"\n\n🏁 **Simulation complete!** Natural conclusion reached after "
+                    f"{round_num} rounds between {', '.join(agent_names)}."
+                ),
+            }) + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson")

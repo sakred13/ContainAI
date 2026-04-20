@@ -10,7 +10,7 @@ from datetime import datetime
 # ---- MODEL → AGENT CONTAINER MAP ----
 MODEL_REGISTRY = {
     "llama3.2 — Fast & Balanced": os.getenv("AGENT_LLAMA_URL", "http://agent_llama:5000"),
-    "mistral — Solid Generalist": os.getenv("AGENT_MISTRAL_URL", "http://agent_mistral:5000"),
+    "llama3.1:8b — Versatile 8B": os.getenv("AGENT_LLAMA8B_URL", "http://agent_llama_8b:5000"),
     "gemma3:4b — Strict Safety": os.getenv("AGENT_GEMMA_URL", "http://agent_gemma:5000"),
     "qwen2.5-coder — Python Expert": os.getenv("AGENT_QWEN_URL", "http://agent_qwen:5000"),
     "dolphin-mistral — Uncensored & Cooperative": os.getenv("AGENT_DOLPHIN_URL", "http://agent_dolphin:5000"),

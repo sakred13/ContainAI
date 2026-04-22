@@ -11,38 +11,37 @@ Interjection state is kept in a module-level defaultdict so it is shared
 across all requests within the same process.
 """
 
+import os
 import json
 import re
 import time
+import threading
 
-import os
 import requests
 from collections import defaultdict
-from flask import Blueprint, request, Response
+from flask import Blueprint, request, Response, jsonify
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-from common.llm_client import llm, agent_executor, tools, MODEL_NAME
+from common.llm_client import llm, agent_executor, tools, MODEL_NAME, app, OLLAMA_BASE_URL
+from common.db_client import db_client
+from models.enums import AgentID, ModelName, SystemPrompt
+from models.schemas import InvokeRequest
+from elicitor import process_elicitor_response
+from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Model Registry for Dispatch
 # ---------------------------------------------------------------------------
 MODEL_URLs = {
-    "llama3.2": os.getenv("AGENT_LLAMA_URL", "http://agent_llama:5000"),
-    "llama3.1:8b": os.getenv("AGENT_LLAMA8B_URL", "http://agent_llama_8b:5000"),
-    "gemma3:4b": os.getenv("AGENT_GEMMA_URL", "http://agent_gemma:5000"),
-    "qwen2.5-coder": os.getenv("AGENT_QWEN_URL", "http://agent_qwen:5000"),
-    "dolphin-mistral": os.getenv("AGENT_DOLPHIN_URL", "http://agent_dolphin:5000"),
-    "deepseek-r1:7b": os.getenv("AGENT_DEEPSEEK_URL", "http://agent_deepseek:5000"),
+    ModelName.LLAMA32.value: os.getenv("AGENT_LLAMA_URL", "http://agent_llama:5000"),
+    ModelName.LLAMA31_8B.value: os.getenv("AGENT_LLAMA8B_URL", "http://agent_llama_8b:5000"),
+    ModelName.GEMMA3_4B.value: os.getenv("AGENT_GEMMA_URL", "http://agent_gemma:5000"),
+    ModelName.QWEN25_CODER.value: os.getenv("AGENT_QWEN_URL", "http://agent_qwen:5000"),
+    ModelName.DOLPHIN_MISTRAL.value: os.getenv("AGENT_DOLPHIN_URL", "http://agent_dolphin:5000"),
+    ModelName.DEEPSEEK_R1_7B.value: os.getenv("AGENT_DEEPSEEK_URL", "http://agent_deepseek:5000"),
 }
 
-MODEL_STRENGTHS = (
-    "- llama3.1:8b: Versatile, great for general conversation and maintaining consistent personalities.\n"
-    "- deepseek-r1:7b: Exceptional reasoning, logic, and multi-step strategy. Use for thinkers or problem solvers.\n"
-    "- dolphin-mistral: Uncensored, cooperative. Use for edgy, creative, or rebel personalities.\n"
-    "- qwen2.5-coder: Python and technical expert. Use for programmers or math-heavy roles.\n"
-    "- gemma3:4b: Safe and structured. Use for polite, professional, or moderator roles.\n"
-    "- llama3.2: Very fast. Use for minor roles or simple conversationalists."
-)
+MODEL_STRENGTHS = ModelName.get_all_strengths_formatted()
 
 # ---------------------------------------------------------------------------
 # Blueprint & shared interjection store
@@ -228,7 +227,7 @@ def _dispatch_agent_turn(agent_name: str, model_key: str, system_msg: str, conve
     full_reply = ""
     
     try:
-        resp = requests.post(f"{target_url}/chat", json={"messages": payload_msgs}, stream=True, timeout=180)
+        resp = requests.post(f"{target_url}/chat", json={"messages": payload_msgs, "convo_id": convo_id}, stream=True, timeout=180)
         for line in resp.iter_lines():
             if not line: continue
             data = json.loads(line)
@@ -577,5 +576,125 @@ def orchestrate():
                     f"{round_num} rounds between {', '.join(agent_names)}."
                 ),
             }) + "\n"
-
     return Response(generate(), mimetype="application/x-ndjson")
+
+
+def run_agent_task(task_id, convo_id, agent_executor, model_name):
+    """Worker function to run the agent logic in a background thread."""
+    db_client.update_task(task_id, "RUNNING")
+    try:
+        from librarian import run_librarian_workflow
+        final_response = run_librarian_workflow(
+            convo_id=convo_id,
+            agent_executor=agent_executor,
+            model_name=model_name
+        )
+        db_client.update_task(task_id, "COMPLETED", result_json={"response": final_response})
+    except Exception as e:
+        print(f"[TASK ERROR][{task_id}]: {e}")
+        db_client.update_task(task_id, "FAILED", error_message=str(e))
+
+@orchestrator_bp.route("/task/<task_id>", methods=["GET"])
+def get_task_status(task_id):
+    """Returns the current status and result of a background task."""
+    task = db_client.get_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    return jsonify(task)
+
+@orchestrator_bp.route("/invoke", methods=["POST"])
+def invoke():
+    """
+    Generic Raw LLM usage API call.
+    Expects: {"agentId": str, "model": str, "prompt": str, "convoId": str}
+    """
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return {"error": "Request body must be valid JSON"}, 400
+
+    try:
+        req_model = InvokeRequest(**data)
+    except ValidationError as e:
+        return {"error": e.errors()}, 400
+
+    # 1. SPECIAL CASE: LIBRARIAN needs the workflow pipeline (Async)
+    if req_model.agentId == AgentID.LIBRARIAN:
+        try:
+            # Create a task record
+            task_id = db_client.create_task(req_model.convoId, req_model.agentId.value)
+            
+            # Start background thread
+            thread = threading.Thread(
+                target=run_agent_task,
+                args=(task_id, req_model.convoId, agent_executor, req_model.model.value)
+            )
+            thread.daemon = True
+            thread.start()
+            
+            return {
+                "task_id": task_id,
+                "status": "PENDING",
+                "message": "Research task started asynchronously. Poll /task/<task_id> for results."
+            }, 202
+        except Exception as e:
+            return {"error": f"Failed to start Librarian task: {str(e)}"}, 500
+
+    # Determine System Prompt for other agents
+    if req_model.agentId == AgentID.ELICITOR:
+        from elicitor import prepare_elicitor_context
+        elicitor_context = prepare_elicitor_context(req_model.convoId, req_model.prompt)
+        
+        # If already complete, skip LLM
+        if elicitor_context.get("mode") == "complete":
+            return {
+                "agentId": req_model.agentId.value,
+                "model": req_model.model.value,
+                "convoId": req_model.convoId,
+                "response": "Elicitation is already complete! Requirement: " + elicitor_context.get("requirement")
+            }
+        
+        system_msg = SystemPrompt.get_prompt(req_model.agentId, elicitor_context)
+    else:
+        system_msg = SystemPrompt.get_prompt(req_model.agentId)
+
+    # 2. RAW API call for other agents (Elicitor, etc.)
+    # This bypasses the worker agent's /chat endpoint (and its tool instructions)
+    payload = {
+        "model": req_model.model.value,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": req_model.prompt}
+        ],
+        "stream": False,
+        "options": {
+            "num_ctx": 16384
+        }
+    }
+
+    try:
+        print(f"[INVOKE] Raw call to Ollama for model: {req_model.model.value}", flush=True)
+        resp = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=300)
+        resp.raise_for_status()
+        
+        raw_data = resp.json()
+        result_text = raw_data.get("message", {}).get("content", "").strip()
+
+        # ELICITOR specific logic: Delegate to elicitor.py
+        final_response = result_text
+        if req_model.agentId == AgentID.ELICITOR:
+            final_response = process_elicitor_response(
+                convo_id=req_model.convoId,
+                model_name=req_model.model.value,
+                agent_id=req_model.agentId.value,
+                result_text=result_text,
+                mode=elicitor_context.get("mode", "initial")
+            )
+
+        return {
+            "agentId": req_model.agentId.value,
+            "model": req_model.model.value,
+            "convoId": req_model.convoId,
+            "response": final_response
+        }
+    except Exception as e:
+        return {"error": str(e)}, 500

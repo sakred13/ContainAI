@@ -32,7 +32,8 @@ app = Flask(__name__)
 # Tools & agent executor
 # ---------------------------------------------------------------------------
 tools = get_all_tools()
-llm = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL, num_ctx=8192)
+llm = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL, num_ctx=16384, timeout=300)
+# create_react_agent (LangGraph) returns a compiled graph
 agent_executor = create_react_agent(llm, tools)
 
 # ---------------------------------------------------------------------------

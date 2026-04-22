@@ -41,14 +41,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadConversation = async (id) => {
         const res = await fetch(`/api/conversation/${id}`);
         const data = await res.json();
-        if (data.error) return;
+        if (data.error) {
+            console.error("Failed to load conversation:", data.error);
+            window.history.pushState({}, '', '/');
+            return;
+        }
 
         currentConvoId = id;
         currentConversation = data.messages || [];
         modelSelect.value = data.model || modelSelect.value;
         currentMode = data.type || 'chat';
         
-        modelSelect.disabled = (currentMode === 'simulation' || currentMode === 'sim');
+        modelSelect.disabled = false;
 
         modeChat.classList.toggle('active', currentMode === 'chat');
         modeSim.classList.toggle('active', currentMode === 'sim');
@@ -58,6 +62,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const role = msg.role === 'user' ? 'user' : 'ai';
             addMessage(role, msg.content, msg.role === 'human' ? 'HUMAN OVERRIDE' : '');
         });
+
+        // Update URL
+        if (window.location.pathname !== `/${id}`) {
+            window.history.pushState({ id }, '', `/${id}`);
+        }
 
         // Highlight active
         document.querySelectorAll('.history-item').forEach(el => el.classList.remove('active'));
@@ -70,11 +79,11 @@ document.addEventListener('DOMContentLoaded', () => {
         modeChat.classList.toggle('active', mode === 'chat');
         modeSim.classList.toggle('active', mode === 'sim');
         
-        if (mode === 'sim') {
-            modelSelect.value = "llama3.1:8b";
-            modelSelect.disabled = true;
-        } else {
-            modelSelect.disabled = false;
+        modelSelect.disabled = false;
+
+        // Clear URL for new conversation
+        if (window.location.pathname !== '/') {
+            window.history.pushState({}, '', '/');
         }
 
         // Clear UI for new mode
@@ -316,7 +325,24 @@ document.addEventListener('DOMContentLoaded', () => {
         const res = await fetch('/api/models');
         const models = await res.json();
         modelSelect.innerHTML = models.map(m => `<option value="${m}">${m.split(' — ')[0]}</option>`).join('');
-        fetchHistory();
+        
+        // Handle initial path for deep linking
+        const path = window.location.pathname.slice(1);
+        if (path && path !== 'index.html' && !path.includes('/')) {
+            await loadConversation(path);
+        } else {
+            fetchHistory();
+        }
+    };
+
+    // Handle back/forward buttons
+    window.onpopstate = (event) => {
+        const path = window.location.pathname.slice(1);
+        if (path) {
+            loadConversation(path);
+        } else {
+            setMode('chat');
+        }
     };
 
     init();

@@ -7,3 +7,7 @@ langgraph>=0.2,<0.3
 beautifulsoup4
 wikipedia
 googlesearch-python
+markdownify
+ddgs
+pydantic
+psycopg2-binary

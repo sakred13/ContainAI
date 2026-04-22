@@ -22,7 +22,7 @@ CONVERSATIONS_DIR = os.getenv("CONVERSATIONS_DIR", "/data/conversations")
 os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
 
 def new_conversation_id():
-    return str(uuid.uuid4())[:8]
+    return str(uuid.uuid4())
 
 def save_conversation(convo_id, model, history, convo_type="chat"):
     """Save conversation to a JSON file."""
@@ -81,7 +81,7 @@ def get_text_content(content):
         return str(content[0])
     return str(content)
 
-def stream_from_agent(messages, model_name):
+def stream_from_agent(messages, model_name, convo_id="default"):
     """Stream chat response from the selected model's agent container."""
     agent_url = MODEL_REGISTRY.get(model_name)
     if not agent_url:
@@ -93,7 +93,7 @@ def stream_from_agent(messages, model_name):
     for msg in messages:
         payload_messages.append({"role": msg["role"], "content": get_text_content(msg["content"])})
     
-    payload = {"messages": payload_messages}
+    payload = {"messages": payload_messages, "convo_id": convo_id}
     try:
         response = requests.post(f"{agent_url}/chat", json=payload, stream=True, timeout=120)
         for line in response.iter_lines():
@@ -120,7 +120,7 @@ def submit_message(message, history, selected_model, convo_id):
     
     # Stream response from agent
     output = ""
-    for event in stream_from_agent(history, selected_model):
+    for event in stream_from_agent(history, selected_model, convo_id):
         etype = event.get("type")
         if etype == "token":
             output += event["content"]
@@ -128,9 +128,12 @@ def submit_message(message, history, selected_model, convo_id):
         elif etype == "tool_start":
             tool_name = event.get("name", "")
             tool_input = event.get("input", "")
-            output += f"\n\n> **🛠️ Calling Tool:** `{tool_name}`\n> **Input:** `{tool_input}`\n\n"
+            # Add a unique placeholder for this tool's spinner
+            output += f"\n\n> **🛠️ Calling Tool:** `{tool_name}` <span class='tool-spinner'></span>\n> **Input:** `{tool_input}`\n\n"
             yield history + [{"role": "assistant", "content": output}], "", convo_id
         elif etype == "tool_end":
+            # Remove the spinner now that the tool is done
+            output = output.replace(" <span class='tool-spinner'></span>", "")
             tool_output = event.get("output", "")
             content_safe = str(tool_output).replace("<", "&lt;").replace(">", "&gt;")
             output += f"<details>\n<summary><b>✅ Tool Result ({len(tool_output)} chars) - Click to expand</b></summary>\n\n<pre><code>{content_safe}</code></pre>\n\n</details>\n\n"
@@ -181,7 +184,24 @@ URL_SYNC_JS = """
 }
 """
 
-with gr.Blocks(title="ContainAI") as demo:
+CSS = """
+.tool-spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 3px solid rgba(255,255,255,.3);
+    border-radius: 50%;
+    border-top-color: #3498db;
+    animation: spin 1s ease-in-out infinite;
+    vertical-align: middle;
+    margin-bottom: 2px;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+"""
+
+with gr.Blocks(title="ContainAI", css=CSS) as demo:
     gr.Markdown("# 🐋 ContainAI")
     
     url_updater = gr.Textbox(visible=False, elem_id="url_updater")

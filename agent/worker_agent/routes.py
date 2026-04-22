@@ -36,30 +36,38 @@ MANUAL_TOOL_MODELS = {
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(convo_id: str = "default") -> str:
     return (
         f"You are a helpful AI assistant powered by {MODEL_NAME}. "
+        f"\n\nCURRENT CONVERSATION ID: {convo_id}"
         "\n\nCRITICAL RULE: DO NOT USE TOOLS FOR GREETINGS OR CASUAL CONVERSATION. "
         "If a user says 'Hi', 'Hello', or 'How are you?', you MUST respond with text ONLY. "
         "\n\nDETAILED TOOL RULES:\n"
         "- ONLY use tools when the user's request GENUINELY requires external information you do not already know.\n"
+        "When responding, ask yourself if a tool is needed. If not, don't use a tool - respond with what you know.\n"
         "- For greetings, opinions, creative writing, general knowledge, coding questions, or math — respond directly. DO NOT call any tools.\n"
-        "- Use 'robust_internet_search' for quick lookups: current news, headlines, or when you only need a summary.\n"
-        "- Use 'deep_internet_search' for detailed research: when you need full article content, in-depth facts, or snippets are not enough.\n"
+        "- Use 'internet_search' for all web lookups. By default, it performs a quick search. Set 'deep_search=True' ONLY for detailed research, full article content, or when looking up private individuals likely to require deep verification. ALWAYS pass the current conversation ID.\n"
         "- Use 'fetch_website_content' ONLY for a specific URL explicitly provided by the user.\n"
         "- Use 'wikipedia_search' ONLY for widely recognized subjects: famous people, historical events, scientific concepts, countries, or established organizations. Never use it for private individuals or regular people.\n"
         "- Use 'execute_python_code' ONLY when explicitly asked to run or test code.\n"
-        "- Use 'get_current_time' ONLY when the user explicitly asks for the current time or date.\n"
-        "\nFALLBACK RULE: If a tool returns no results or fails, you MUST try 'deep_internet_search' before giving up or asking the user for more information.\n"
-        "PERSON LOOKUP RULE: If asked 'Who is [person]?' and they are not globally famous, skip wikipedia_search and go straight to 'deep_internet_search'. When you get the results, ALWAYS summarize what you found (e.g., their current job, location, or school from LinkedIn/socials) directly. Do not apologize for them not being famous, and do not ask to try another search.\n"
-        "NO NARRATION RULE: NEVER say 'I will search', 'Let me look that up', 'Performing a search', or any similar phrase. If you need a tool, call it IMMEDIATELY and silently. Do not announce or describe tool usage in text.\n"
-        "\nEXAMPLE OF WRONG BEHAVIOR:\n"
+        "- Use 'get_current_time' ONLY when the user explicitly asks for the current time or date. DO NOT look up news or events unless specifically requested.\n"
+        "\nFALLBACK RULE: If 'internet_search' returns no results, it will automatically fallback to a deep search. You HONESTLY ADMIT when information cannot be found.\n"
+        "PERSON LOOKUP RULE: If asked 'Who is [person]?' and they are not globally famous, skip wikipedia_search and go straight to 'internet_search' with 'deep_search=True'. Summarize findings (job, location, school) directly.\n"
+        "NO NARRATION RULE: NEVER say 'I will search', 'Let me look that up', 'Performing a search', or any similar phrase. If you need a tool, you MUST output the <tool_call> block IMMEDIATELY and output NOTHING ELSE. No text before it, no explanation after it. Just the tool call.\n"
+        "STRICT FOCUS RULE: If the user asks a simple question (e.g., 'What time is it?', 'What timezone is X in?'), and you retrieve the answer, STOP. Do NOT perform extra unprompted searches for news, weather, or events to 'add context'. Provide the answer concisely.\n"
+        "NO HALLUCINATION RULE: If your tools return 'No search results found' or other errors, you MUST HONESTLY ADMIT that you cannot find the information. NEVER guess, NEVER provide 'estimates', and NEVER say 'according to various sources' if your tools found nothing. It is better to say 'I don't know' than to provide random or potentially incorrect data.\n"
+        "\nEXAMPLES OF WRONG BEHAVIOR:\n"
+        "User: 'Who is Saketh Poduvu?'\n"
+        "Assistant: 'I am not sure, let me search for him.' <tool_call>... <--- WRONG! The introductory text is banned. Use the tool call ONLY.\n"
+        "User: 'How far is St. Louis from Kansas City?'\n"
+        "Tool Observation: 'No search results found.'\n"
+        "Assistant: 'It is approximately 310 miles.' <--- WRONG! You must admit you found no information.\n"
         "User: 'Hi'\n"
         "Assistant: [Calling get_current_time] <--- WRONG! Respond with 'Hello! How can I help you?' instead."
     )
 
 
-def _lc_messages_from_request(messages: list) -> list:
+def _lc_messages_from_request(messages: list, convo_id: str = "default") -> list:
     """Convert raw request message dicts to LangChain message objects."""
     lc_messages = []
     
@@ -67,7 +75,7 @@ def _lc_messages_from_request(messages: list) -> list:
     has_system = any(msg["role"] == "system" for msg in messages)
     
     if not has_system:
-        lc_messages.append(SystemMessage(content=_build_system_prompt()))
+        lc_messages.append(SystemMessage(content=_build_system_prompt(convo_id)))
         
     for msg in messages:
         if msg["role"] == "system":
@@ -134,7 +142,7 @@ def _native_stream(lc_messages: list):
                     yield json.dumps({"type": "token", "content": content}) + "\n"
 
 
-def _manual_tool_stream(lc_messages: list):
+def _manual_tool_stream(lc_messages: list, convo_id: str = "default"):
     """
     Text-based <tool_call> / <observation> fallback loop for models that
     reject native tool binding.
@@ -172,6 +180,7 @@ def _manual_tool_stream(lc_messages: list):
     )
 
     my_messages = [SystemMessage(content=sys_msg)] + lc_messages[1:]
+    print(f"[WORKER] Calling LLM with {len(my_messages)} messages. Last msg: {my_messages[-1].content[:100]}...", flush=True)
     MAX_STEPS = 5
 
     for _step in range(MAX_STEPS):
@@ -194,6 +203,7 @@ def _manual_tool_stream(lc_messages: list):
 
             if not is_tool_call:
                 if "<" in buffer:
+                    # Keep everything from the first '<' in the buffer to check for tool calls
                     idx = buffer.find("<")
                     prefix = buffer[idx:]
                     if "<tool_call>".startswith(prefix.lower()):
@@ -239,6 +249,10 @@ def _manual_tool_stream(lc_messages: list):
                 t_args = {k: _coerce(v) for k, v in t_args.items()}
 
                 if t_name in tool_map:
+                    # Auto-inject conversation_id if missing but the tool expects it
+                    if convo_id and t_name == "deep_internet_search" and "conversation_id" not in t_args:
+                        t_args["conversation_id"] = convo_id
+
                     t_input_str = str(list(t_args.values())[0]) if t_args else ""
                     yield json.dumps({"type": "tool_start", "name": t_name, "input": t_input_str[:200]}) + "\n"
 
@@ -247,7 +261,7 @@ def _manual_tool_stream(lc_messages: list):
 
                     my_messages.append(
                         HumanMessage(
-                            content=f"<observation>\n{tool_result}\n</observation>\nNow continue your thought process."
+                            content=f"<observation>\n{tool_result}\n</observation>\nIf you have the answer, output it directly to the user now. Do NOT call another tool unless absolutely necessary."
                         )
                     )
                     continue
@@ -277,12 +291,17 @@ def chat():
         return {"error": "Request body must be valid JSON"}, 400
 
     messages = data.get("messages", [])
-    lc_messages = _lc_messages_from_request(messages)
+    convo_id = data.get("convo_id")
+    if not convo_id or convo_id in ["default", "unknown", "None", "<current conversation ID>"]:
+        import uuid
+        convo_id = str(uuid.uuid4())
+    print(f"[WORKER] Incoming convo_id: {convo_id}", flush=True)
+    lc_messages = _lc_messages_from_request(messages, convo_id)
 
     def generate():
         # Using manual tool stream uniformly for all models.
         # Ollama's native tool binding frequently injects JSON schema dicts
         # instead of scalar values, causing Pydantic to crash in the native path.
-        yield from _manual_tool_stream(lc_messages)
+        yield from _manual_tool_stream(lc_messages, convo_id)
 
     return Response(generate(), mimetype="application/x-ndjson")

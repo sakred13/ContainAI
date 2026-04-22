@@ -1,5 +1,7 @@
+version: '3.8'
+
 services:
-  # ---- BACKEND: Shared Ollama Model Engine ----
+  # ---- OLLAMA ENGINE ----
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
@@ -8,80 +10,37 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
-  # ---- GATEWAY: Gradio Frontend (Model Selector UI) ----
-  gateway:
-    build:
-      context: ./gateway
-      dockerfile: Dockerfile
-    container_name: llama_gateway
-    ports:
-      - "7860:7860"
-    volumes:
-      - ./gateway:/app
-      - ./conversations:/data/conversations
-    depends_on:
-      - agent_llama
-      - agent_llama_8b
-      - agent_gemma
-      - agent_qwen
-      - agent_dolphin
-      - agent_deepseek
-    restart: unless-stopped
-
-  # ---- AGENT: Llama 3.2 ----
-  agent_llama:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
-    container_name: agent_llama
-    environment: &agent_env
-      OLLAMA_BASE_URL: http://ollama:11434
-      AGENT_LLAMA_URL: http://agent_llama:5000
-      AGENT_LLAMA8B_URL: http://agent_llama_8b:5000
-      AGENT_GEMMA_URL: http://agent_gemma:5000
-      AGENT_QWEN_URL: http://agent_qwen:5000
-      AGENT_DOLPHIN_URL: http://agent_dolphin:5000
-      AGENT_DEEPSEEK_URL: http://agent_deepseek:5000
-      MODEL_NAME: llama3.2
-    volumes:
-      - ./agent:/app
-    depends_on:
-      - ollama
-    restart: unless-stopped
-
-  # ---- AGENT: Llama 3.1 8B ----
-  agent_llama_8b:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
-    container_name: agent_llama_8b
+  # ---- POSTGRES DATABASE ----
+  db:
+    image: postgres:15-alpine
+    container_name: containai_db
     environment:
-      <<: *agent_env
-      MODEL_NAME: llama3.1
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: containai
+    ports:
+      - "5433:5432"
     volumes:
-      - ./agent:/app
-    depends_on:
-      - ollama
-    restart: unless-stopped
-  # ---- MODERN_UI: Custom Premium Frontend (Glassmorphism & HTML proxy) ----
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d containai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---- MODERN UI (Next.js/React Wrapper) ----
   modern_ui:
     build:
       context: ./modern_ui
-      dockerfile: Dockerfile
     container_name: modern_ui
     ports:
       - "8080:8080"
     volumes:
       - ./modern_ui:/app
       - ./conversations:/data/conversations
+      - ./context:/context
     environment:
       CONVERSATIONS_DIR: /data/conversations
       AGENT_LLAMA_URL: http://agent_llama:5000
@@ -99,65 +58,115 @@ services:
       - agent_deepseek
     restart: unless-stopped
 
-  # ---- AGENT: Gemma 3 4B ----
-  agent_gemma:
+  # ---- LLAMA GATEWAY (Legacy Gradio) ----
+  llama_gateway:
     build:
-      context: ./agent
+      context: ./gateway
       dockerfile: Dockerfile
-    container_name: agent_gemma
-    environment:
-      <<: *agent_env
-      MODEL_NAME: gemma3:4b
+    container_name: llama_gateway
+    ports:
+      - "7860:7860"
     volumes:
-      - ./agent:/app
+      - .:/app
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
     depends_on:
       - ollama
+    restart: unless-stopped
+
+  # Common config for all agents
+  x-agent-env: &agent_env
+    build:
+      context: ./agent
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+
+  # ---- AGENT: Llama 3.2 (Default Specialist) ----
+  agent_llama:
+    <<: *agent_env
+    container_name: agent_llama
+    environment:
+      MODEL_NAME: llama3.2
+      OLLAMA_BASE_URL: http://ollama:11434
+      POSTGRES_HOST: db
+    volumes:
+      - ./agent:/app
+      - ./context:/context
+    restart: unless-stopped
+
+  # ---- AGENT: Llama 3.1 8B (Generalist) ----
+  agent_llama_8b:
+    <<: *agent_env
+    container_name: agent_llama_8b
+    environment:
+      MODEL_NAME: llama3.1:8b
+      OLLAMA_BASE_URL: http://ollama:11434
+      POSTGRES_HOST: db
+    volumes:
+      - ./agent:/app
+      - ./context:/context
+    restart: unless-stopped
+
+  # ---- AGENT: DeepSeek R1 7B (Reasoning Specialist) ----
+  agent_deepseek:
+    <<: *agent_env
+    container_name: agent_deepseek
+    environment:
+      MODEL_NAME: deepseek-r1:7b
+      OLLAMA_BASE_URL: http://ollama:11434
+      POSTGRES_HOST: db
+    volumes:
+      - ./agent:/app
+      - ./context:/context
     restart: unless-stopped
 
   # ---- AGENT: Qwen 2.5 Coder (Coding Specialist) ----
   agent_qwen:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
+    <<: *agent_env
     container_name: agent_qwen
     environment:
-      <<: *agent_env
       MODEL_NAME: qwen2.5-coder
+      OLLAMA_BASE_URL: http://ollama:11434
+      POSTGRES_HOST: db
     volumes:
       - ./agent:/app
-    depends_on:
-      - ollama
+      - ./context:/context
     restart: unless-stopped
 
   # ---- AGENT: Dolphin Mistral (Uncensored Variant) ----
   agent_dolphin:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
+    <<: *agent_env
     container_name: agent_dolphin
     environment:
-      <<: *agent_env
       MODEL_NAME: dolphin-mistral
+      OLLAMA_BASE_URL: http://ollama:11434
+      POSTGRES_HOST: db
     volumes:
       - ./agent:/app
-    depends_on:
-      - ollama
+      - ./context:/context
     restart: unless-stopped
 
-  # ---- AGENT: DeepSeek R1 7B (Reasoning Model) ----
-  agent_deepseek:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
-    container_name: agent_deepseek
+  # ---- AGENT: Gemma 3 4B (Balanced) ----
+  agent_gemma:
+    <<: *agent_env
+    container_name: agent_gemma
     environment:
-      <<: *agent_env
-      MODEL_NAME: deepseek-r1:7b
+      MODEL_NAME: gemma3:4b
+      OLLAMA_BASE_URL: http://ollama:11434
+      POSTGRES_HOST: db
     volumes:
       - ./agent:/app
-    depends_on:
-      - ollama
+      - ./context:/context
     restart: unless-stopped
+
+networks:
+  default:
+    name: containai-network
 
 volumes:
   ollama_data:
+  postgres_data:
+  context:

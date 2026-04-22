@@ -11,6 +11,10 @@ Responsibility: register blueprints on the shared Flask app and expose the
   orchestrator_agent/– /orchestrate and /interject endpoints (multi-agent sim)
 """
 
+import os
+import time
+import shutil
+import threading
 from common.llm_client import app, startup, MODEL_NAME
 from worker_agent.routes import worker_bp
 from orchestrator_agent.routes import orchestrator_bp
@@ -19,6 +23,36 @@ from orchestrator_agent.routes import orchestrator_bp
 app.register_blueprint(worker_bp)
 app.register_blueprint(orchestrator_bp)
 
+def context_cleanup_worker():
+    """Background task to delete context older than 30 minutes every 30 minutes."""
+    CONTEXT_DIR = "/context"
+    # Wait for app to warm up
+    time.sleep(10)
+    while True:
+        try:
+            if os.path.exists(CONTEXT_DIR):
+                print("[CLEANUP] Scanning /context for old files...", flush=True)
+                now = time.time()
+                # 30 minutes in seconds = 1800
+                cutoff = now - 10800
+                
+                for item in os.listdir(CONTEXT_DIR):
+                    item_path = os.path.join(CONTEXT_DIR, item)
+                    mtime = os.path.getmtime(item_path)
+                    
+                    if mtime < cutoff:
+                        print(f"[CLEANUP] Removing old context: {item}", flush=True)
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                        else:
+                            os.remove(item_path)
+            else:
+                os.makedirs(CONTEXT_DIR, exist_ok=True)
+        except Exception as e:
+            print(f"[CLEANUP] Error during context cleanup: {e}", flush=True)
+        
+        # Sleep for 30 minutes
+        time.sleep(1800)
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -26,5 +60,9 @@ def health():
 
 
 if __name__ == "__main__":
+    # Start the cleanup worker thread
+    cleanup_thread = threading.Thread(target=context_cleanup_worker, daemon=True)
+    cleanup_thread.start()
+    
     startup()
     app.run(host="0.0.0.0", port=5000, threaded=True)

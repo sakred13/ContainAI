@@ -105,7 +105,8 @@ def _handle_followup_save(convo_id, model_name, agent_id, validation_obj):
             break
 
     # 4. Save updated state
-    status = ConversationStatus.ELICITING.value if next_question else ConversationStatus.COMPLETE.value
+    status = ConversationStatus.ELICITING.value if next_question else ConversationStatus.ELICITATION_COMPLETE.value
+
     db_client.upsert_state(
         convo_id=convo_id,
         state_json=state_json,

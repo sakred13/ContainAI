@@ -6,6 +6,8 @@ from langchain_core.tools import tool
 # Import tools from other modules
 from .internet_tools import get_internet_tools
 from .context_tools import get_context_tools
+from .librarian_tools import get_librarian_tools
+
 
 @tool
 def get_current_time(timezone_name: str = "") -> str:
@@ -48,8 +50,10 @@ def get_all_tools():
     """Combines tools from all separate tool files."""
     internet_tools = get_internet_tools()
     context_tools = get_context_tools()
+    librarian_tools = get_librarian_tools()
     
     # Other tools defined in this file
     other_tools = [get_current_time, execute_python_code]
     
-    return internet_tools + context_tools + other_tools
+    return internet_tools + context_tools + librarian_tools + other_tools
+

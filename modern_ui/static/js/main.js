@@ -56,6 +56,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         modeChat.classList.toggle('active', currentMode === 'chat');
         modeSim.classList.toggle('active', currentMode === 'sim');
+        document.getElementById('mode-code').classList.toggle('active', currentMode === 'code');
+
+        if (currentMode === 'code') {
+            codingModule.setMode('code');
+            return; // codingModule handles its own rendering and polling
+        } else {
+            codingModule.setMode('chat'); // Reset to chat UI
+        }
 
         chatBox.innerHTML = "";
         currentConversation.forEach(msg => {

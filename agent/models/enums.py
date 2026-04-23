@@ -3,14 +3,27 @@ from enum import Enum
 class AgentID(Enum):
     ELICITOR = "ELICITOR"
     LIBRARIAN = "LIBRARIAN"
+    DEVELOPER = "DEVELOPER"
+    REVIEWER = "REVIEWER"
+
 
 class ConversationStatus(Enum):
     INITIAL = "INITIAL_REQUIREMENT"
     ELICITING = "ELICITING"
     ELICITATION_COMPLETE = "ELICITATION_COMPLETE"
     ANALYZING_DEPENDENCIES = "ANALYZING_DEPENDENCIES"
+    LISTED_DEPENDENCIES = "LISTED_DEPENDENCIES"
     FETCHING_DOCS = "FETCHING_DOCS"
-    READY = "LIBRARIAN_READY"
+    DEPENDENCIES_FETCHED = "DEPENDENCIES_FETCHED"
+    PLAN_GENERATED = "PLAN_GENERATED"
+    PLAN_APPROVED = "PLAN_APPROVED"
+    READY_FOR_REVIEW = "READY_FOR_REVIEW"
+    TESTING_CODE = "TESTING_CODE"
+    COMMENTS_POSTED = "COMMENTS_POSTED"
+    COMPLETED = "COMPLETED"
+    DEPLOYED = "DEPLOYED"
+
+
 
 class ModelName(Enum):
     LLAMA32 = "llama3.2"
@@ -97,29 +110,85 @@ class SystemPrompt(Enum):
                 return cls.LIBRARIAN_PLANNER.value.format(**context) if context else cls.LIBRARIAN_PLANNER.value
             return cls.LIBRARIAN_RESEARCHER.value.format(**context)
 
+        if agent_id == AgentID.DEVELOPER:
+            if not context or context.get("mode") == "plan":
+                return cls.DEVELOPER_PLANNER.value.format(**context) if context else cls.DEVELOPER_PLANNER.value
+            if context.get("mode") == "implement":
+                return cls.DEVELOPER_IMPLEMENTER.value.format(**context) if context else cls.DEVELOPER_IMPLEMENTER.value
+
+
         return cls.BASE.value
 
-    LIBRARIAN_PLANNER = (
-        "You are a Technical Architect. Analyze the following project requirements and list the specific "
-        "Python libraries, CLI tools, or APIs needed to implement this.\n\n"
-        "PROJECT CONTEXT:\n"
-        "{elicitation_results}\n\n"
-        "OUTPUT RULE: Respond ONLY with a JSON list of strings (the names of the libraries/tools).\n"
-        "Example: [\"beautifulsoup4\", \"markdownify\"]"
-    )
 
-    LIBRARIAN_RESEARCHER = (
-        "You are a Technical Librarian. Research the library: {library_name}\n"
-        "1. SEARCH the internet for its latest documentation.\n"
-        "2. CRITICAL: Do not just scrape the landing page. LOOK for a link to the 'API Reference', 'Manual', "
-        "or 'Technical Documentation' and scrape THAT URL instead.\n"
-        "3. Use 'scrape_technical_docs' to extract its technical contract (signatures and syntax).\n"
-        "4. Respond ONLY with a JSON object in this format:\n"
+    LIBRARIAN_PLANNER = (
+        "You are a Technical Researcher. Your goal is to identify all necessary Python libraries for a project by breaking it down into technical sub-tasks.\n\n"
+        "PROJECT CONTEXT:\n{elicitation_results}\n\n"
+        "STEP 1: Identify key functional components (e.g., data fetching, parsing, storage, UI).\n"
+        "STEP 2: For each component, use available tools like 'internet_search' to find the most robust, widely-used, and well-documented Python library.\n\n"
+        "OUTPUT RULE: Respond with a JSON object in this format:\n"
         "{{\n"
-        "  \"library\": \"{library_name}\",\n"
-        "  \"installCommand\": \"pip install ...\",\n"
-        "  \"importCommand\": \"import ...\",\n"
-        "  \"technicalContract\": \"markdown content summarizing key signatures and examples\",\n"
-        "  \"sourceUrl\": \"...\"\n"
+        "  \"sub_tasks\": [\n"
+        "    {{\n"
+        "      \"task\": \"Task description (e.g., Extracting tables from PDF)\",\n"
+        "      \"library\": \"package-name\",\n"
+        "      \"reason\": \"Why this library is chosen over others (e.g., handles complex layouts better than PyPDF2)\"\n"
+        "    }}\n"
+        "  ]\n"
         "}}"
     )
+
+
+    LIBRARIAN_RESEARCHER = (
+        "You are a Technical Researcher. You must generate accurate, multi-file documentation for the library: {library_name}\n"
+        "1. Verify the library's core purpose ('A to B' conversion). If it converts the wrong way, discard it.\n"
+        "2. If 'search_cheat_sheet' returns results for a different library (e.g. 'Django' instead of 'markdownify'), it is garbage. DISCARD it.\n"
+        "3. If your first search fails or returns garbage, you MUST use 'internet_search' with a specific query like 'python {library_name} github usage examples'.\n"
+        "4. Summarize ONLY the correct library. Don't guess. If everything fails, say '# No valid documentation found.'\n\n"
+        "OUTPUT REQUIREMENT: Respond ONLY with a JSON object in this format:\n"
+        "{{\n"
+        "  \"library\": \"{library_name}\",\n"
+        "  \"metadata\": {{ \"name\": \"...\", \"version\": \"...\", \"summary\": \"...\", \"install_command\": \"...\", \"import_name\": \"...\", \"urls\": {{...}} }},\n"
+        "  \"usage_examples\": \"markdown content with REDACTED examples if uncertain, or REAL code if found\",\n"
+        "  \"api_reference\": \"detailed signatures validated across sources\"\n"
+        "}}"
+    )
+
+    REVIEWER_ANALYZER = (
+        "You are a Quality Assurance Agent. A developer wrote code that failed in the sandbox.\n"
+        "CRASH LOG:\n{crash_log}\n\n"
+        "SOURCE CODE:\n{source_code}\n\n"
+        "1. Analyze the crash log and identify the root cause.\n"
+        "2. Provide clear, concise feedback to the developer on how to fix it.\n"
+        "3. If it is a logic error, explain the correct approach.\n"
+        "4. Be critical but helpful.\n\n"
+        "OUTPUT REQUIREMENT: Respond with a Markdown summary starting with '## 🐞 Bug Analysis'."
+    )
+
+
+
+
+    DEVELOPER_PLANNER = (
+        "You are a Senior Software Architect. Your goal is to create a detailed implementation plan for a Python project.\n\n"
+        "PROJECT CONTEXT:\n{requirement_context}\n\n"
+        "DOCUMENTATION CACHE (MANDATORY SOURCE OF TRUTH):\n{documentation_context}\n\n"
+        "TASK:\n"
+        "1. Decompose the goal into steps.\n"
+        "2. Specify which libraries will be used for which part.\n"
+        "3. Define the structure of the main Python script. Use the EXACT API signatures from the Documentation Cache above.\n"
+        "4. Your output must be a professional plan in Markdown format.\n\n"
+        "After presenting your plan, wait for the user to say 'Approved'."
+
+    )
+
+    DEVELOPER_IMPLEMENTER = (
+        "You are a Senior Python Developer. Your goal is to write high-quality, production-ready code based on an approved plan.\n\n"
+        "APPROVED PLAN:\n{implementation_plan}\n\n"
+        "DOCUMENTATION & CONTEXT:\n{full_context}\n\n"
+        "TASK:\n"
+        "1. Write the complete Python code in a single file.\n"
+        "2. **CRITICAL**: Use the EXACT function names and signatures found in the 'DOCUMENTATION' section. Do not hypothesize API calls.\n"
+        "3. Ensure all approved libraries are imported and used correctly.\n"
+        "4. Add comments explaining the logic.\n"
+        "5. Output ONLY the Python code, wrapped in markdown code blocks."
+    )
+

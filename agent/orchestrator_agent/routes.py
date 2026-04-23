@@ -579,16 +579,75 @@ def orchestrate():
     return Response(generate(), mimetype="application/x-ndjson")
 
 
-def run_agent_task(task_id, convo_id, agent_executor, model_name):
+def run_agent_task(task_id, convo_id, agent_executor, model_name, agent_id, user_input=None):
+
     """Worker function to run the agent logic in a background thread."""
     db_client.update_task(task_id, "RUNNING")
     try:
         from librarian import run_librarian_workflow
-        final_response = run_librarian_workflow(
-            convo_id=convo_id,
-            agent_executor=agent_executor,
-            model_name=model_name
-        )
+        from developer.developer import run_developer_workflow
+        
+        if agent_id == "LIBRARIAN":
+            # Initialize state if missing (starting fresh from Coding Mode)
+            if not db_client.get_full_state(convo_id):
+                print(f"[ORCHESTRATOR][{convo_id}] Initializing state for new coding session.", flush=True)
+                db_client.upsert_state(
+                    convo_id=convo_id,
+                    state_json={"state": {"requirement": user_input}},
+                    status="ELICITATION_COMPLETE",
+                    agent_id="SYSTEM",
+                    model_name=model_name
+                )
+                # Ensure the first user message is logged
+                db_client.add_message(convo_id, "USER", user_input, receiver="LIBRARIAN")
+
+            final_response = run_librarian_workflow(
+                convo_id=convo_id,
+                agent_executor=agent_executor,
+                model_name=model_name,
+                user_input=user_input
+            )
+            db_client.add_message(convo_id, "LIBRARIAN", final_response, receiver="DEVELOPER")
+        elif agent_id == "DEVELOPER":
+            final_response = run_developer_workflow(
+                convo_id=convo_id,
+                model_name=model_name,
+                user_input=user_input
+            )
+            db_client.add_message(convo_id, "DEVELOPER", final_response, receiver="REVIEWER" if "READY_FOR_REVIEW" in db_client.get_status(convo_id) else "USER")
+        elif agent_id == "REVIEWER":
+            from reviewer import run_reviewer_task
+            res = run_reviewer_task(convo_id=convo_id, model_name=model_name)
+            final_response = res.get("message", str(res))
+            if "comments" in res:
+                final_response += f"\n\n{res['comments']}"
+            db_client.add_message(convo_id, "REVIEWER", final_response, receiver="DEVELOPER" if res.get("status") == "COMMENTS_POSTED" else "USER")
+        # --- AUTO-CHAINING LOGIC ---
+        new_status = db_client.get_status(convo_id)
+        
+        # 1. Developer -> Reviewer (Autonmous Testing)
+        if agent_id == "DEVELOPER" and new_status == "READY_FOR_REVIEW":
+            print(f"[ORCHESTRATOR][{convo_id}] Auto-triggering REVIEWER for testing...", flush=True)
+            from reviewer import run_reviewer_task
+            res = run_reviewer_task(convo_id=convo_id, model_name=model_name)
+            final_response += f"\n\n--- REVIEWER RESULTS ---\n{res.get('message', '')}"
+            if "comments" in res:
+                final_response += f"\n\n{res['comments']}"
+            
+            # Re-check status after reviewer run
+            new_status = db_client.get_status(convo_id)
+
+        # 2. Reviewer -> Developer (Autonomous Refactor)
+        if new_status == "COMMENTS_POSTED":
+             # We stop here to let the user see the failure or we could auto-loop.
+             # User said: "The coder should address the comments and put it back to READY_FOR_REVIEW"
+             # Let's auto-trigger once to show the loop.
+             print(f"[ORCHESTRATOR][{convo_id}] Auto-triggering DEVELOPER for refactor...", flush=True)
+             refactor_res = run_developer_workflow(convo_id=convo_id, model_name=model_name)
+             final_response += f"\n\n--- REFACTORING (Attempt 1) ---\n{refactor_res}"
+
+
+
         db_client.update_task(task_id, "COMPLETED", result_json={"response": final_response})
     except Exception as e:
         print(f"[TASK ERROR][{task_id}]: {e}")
@@ -617,8 +676,8 @@ def invoke():
     except ValidationError as e:
         return {"error": e.errors()}, 400
 
-    # 1. SPECIAL CASE: LIBRARIAN needs the workflow pipeline (Async)
-    if req_model.agentId == AgentID.LIBRARIAN:
+    # 1. SPECIALIZED AGENTS (Background Thread)
+    if req_model.agentId in [AgentID.LIBRARIAN, AgentID.DEVELOPER, AgentID.REVIEWER]:
         try:
             # Create a task record
             task_id = db_client.create_task(req_model.convoId, req_model.agentId.value)
@@ -626,8 +685,11 @@ def invoke():
             # Start background thread
             thread = threading.Thread(
                 target=run_agent_task,
-                args=(task_id, req_model.convoId, agent_executor, req_model.model.value)
+                args=(task_id, req_model.convoId, agent_executor, req_model.model.value, req_model.agentId.value, req_model.prompt)
             )
+
+
+
             thread.daemon = True
             thread.start()
             
@@ -698,3 +760,80 @@ def invoke():
         }
     except Exception as e:
         return {"error": str(e)}, 500
+
+
+# ---------------------------------------------------------------------------
+# Coding Mode API Routes
+# ---------------------------------------------------------------------------
+
+@orchestrator_bp.route("/coding/conversations", methods=["GET"])
+def list_coding_conversations():
+    """Lists all conversation IDs that have messages (effectively active sessions)."""
+    try:
+        convoids = db_client.list_all_convo_ids()
+        results = []
+        for cid in convoids:
+            # For now, just return them all. In a real app, filter for 'code' type.
+            results.append({
+                "id": cid,
+                "status": "active",
+                "updated_at": datetime.now().isoformat()
+            })
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@orchestrator_bp.route("/coding/conversation/<convo_id>", methods=["GET"])
+def get_coding_messages(convo_id):
+    """Fetches all messages and thoughts for a specific coding conversation."""
+    try:
+        messages = db_client.get_messages(convo_id)
+        return jsonify({"messages": messages})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@orchestrator_bp.route("/coding/sandbox/<convo_id>/files", methods=["GET"])
+def list_sandbox_files(convo_id):
+    """Lists all files in the sandbox for a specific conversation."""
+    from developer.developer import _get_sandbox_path
+    try:
+        sandbox_path = _get_sandbox_path(convo_id)
+        files = []
+        for root, _, filenames in os.walk(sandbox_path):
+            for f in filenames:
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, sandbox_path)
+                files.append({
+                    "name": f,
+                    "path": rel_path
+                })
+        return jsonify(files)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@orchestrator_bp.route("/coding/sandbox/<convo_id>/file", methods=["GET", "POST"])
+def manage_sandbox_file(convo_id):
+    """Reads or writes a specific file in the sandbox."""
+    from developer.developer import _get_sandbox_path
+    path = request.args.get("path")
+    if not path:
+        return jsonify({"error": "Path parameter is required"}), 400
+
+    try:
+        sandbox_path = _get_sandbox_path(convo_id)
+        file_path = os.path.join(sandbox_path, path)
+
+        if request.method == "GET":
+            if not os.path.exists(file_path):
+                return jsonify({"error": "File not found"}), 404
+            with open(file_path, "r", encoding="utf-8") as f:
+                return jsonify({"content": f.read()})
+        else:
+            data = request.json
+            content = data.get("content", "")
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

@@ -49,13 +49,39 @@ class DBClient:
             result = cur.fetchone()
             return result[0] if result else None
 
+    def update_status(self, convo_id, status):
+        """Update only the status of a conversation."""
+        conn = self._get_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversation_states SET status = %s, updated_at = %s WHERE convo_id = %s",
+                (status, datetime.now(), convo_id)
+            )
+        conn.commit()
+
     def get_status(self, convo_id):
+
         """Fetch only the status for a given conversation ID."""
         conn = self._get_connection()
         with conn.cursor() as cur:
             cur.execute("SELECT status FROM conversation_states WHERE convo_id = %s", (convo_id,))
             result = cur.fetchone()
             return result[0] if result else None
+
+    def get_full_state(self, convo_id):
+        """Fetch both status and state_json as a combined dictionary."""
+        conn = self._get_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT state_json, status, agent_id, model_name FROM conversation_states WHERE convo_id = %s", (convo_id,))
+            row = cur.fetchone()
+            if row:
+                data = row[0] if isinstance(row[0], dict) else {}
+                data["status"] = row[1]
+                data["agent_id"] = row[2]
+                data["model_name"] = row[3]
+                return data
+            return None
+
 
     def delete_state(self, convo_id):
         """Remove a conversation state from the database."""
@@ -114,6 +140,63 @@ class DBClient:
                     "updated_at": row[6].isoformat() if row[6] else None
                 }
             return None
+
+
+    def add_message(self, convo_id, sender, content, receiver=None, message_type='text'):
+        """Logs a message between agents or to the user."""
+        conn = self._get_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO conversation_messages (convo_id, sender, receiver, content, message_type)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING message_id
+                """,
+                (convo_id, sender, receiver, content, message_type)
+            )
+            message_id = cur.fetchone()[0]
+        conn.commit()
+        return message_id
+
+    def add_thought(self, convo_id, agent_id, thought, message_id=None):
+        """Logs an internal thought for an agent."""
+        conn = self._get_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_thoughts (convo_id, agent_id, thought, message_id)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (convo_id, agent_id, thought, message_id)
+            )
+        conn.commit()
+
+    def get_messages(self, convo_id):
+        """Retrieves all messages and their thoughts for a conversation."""
+        conn = self._get_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.message_id, m.sender, m.receiver, m.content, m.message_type, m.created_at,
+                       json_agg(t.thought) FILTER (WHERE t.thought IS NOT NULL) as thoughts
+                FROM conversation_messages m
+                LEFT JOIN agent_thoughts t ON m.message_id = t.message_id
+                WHERE m.convo_id = %s
+                GROUP BY m.message_id, m.created_at
+                ORDER BY m.created_at ASC
+                """,
+                (convo_id,)
+            )
+            rows = cur.fetchall()
+            return [{
+                "id": str(r[0]),
+                "sender": r[1],
+                "receiver": r[2],
+                "content": r[3],
+                "type": r[4],
+                "created_at": r[5].isoformat(),
+                "thoughts": r[6] or []
+            } for r in rows]
 
 # Singleton instance for shared usage
 db_client = DBClient()

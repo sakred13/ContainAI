@@ -37,6 +37,8 @@ def context_cleanup_worker():
                 cutoff = now - 10800
                 
                 for item in os.listdir(CONTEXT_DIR):
+                    if item == "global_docs":
+                        continue
                     item_path = os.path.join(CONTEXT_DIR, item)
                     mtime = os.path.getmtime(item_path)
                     
@@ -46,6 +48,7 @@ def context_cleanup_worker():
                             shutil.rmtree(item_path)
                         else:
                             os.remove(item_path)
+
             else:
                 os.makedirs(CONTEXT_DIR, exist_ok=True)
         except Exception as e:

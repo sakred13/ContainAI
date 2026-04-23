@@ -11,3 +11,4 @@ markdownify
 ddgs
 pydantic
 psycopg2-binary
+docker
